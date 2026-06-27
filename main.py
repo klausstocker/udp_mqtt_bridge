@@ -25,25 +25,29 @@ def fatal_error(message, error=None):
 	sys.exit(1)
 
 
+def handle_message(message):
+	global gPower, gAllow
+	if message.startswith('Power='):
+		power = float(message.split('=', 1)[1])
+		gPower = min(power, 11)
+		print(f'publish power={gPower}')
+		publish()
+	elif message.startswith('Allow='):
+		allow = int(message.split('=', 1)[1])
+		gAllow = allow
+		print(f'publish allow={gAllow}')
+		publish()
+
+
 class UDP2MQTT(asyncio.DatagramProtocol):
 	def connection_made(self, transport):
 		self.transport = transport
 
 	def datagram_received(self, data, addr):
-		global gPower, gAllow
 		try:
 			message = data.decode()
 			print(f"Received {message} from {addr}")
-			if message.startswith('Power='):
-				power = float(message.split('=', 1)[1])
-				gPower = min(power, 11)
-				print(f'publish power={gPower}')
-				publish()
-			elif message.startswith('Allow='):
-				allow = int(message.split('=', 1)[1])
-				gAllow = allow
-				print(f'publish allow={gAllow}')
-				publish()
+			handle_message(message)
 		except SystemExit:
 			raise
 		except Exception as error:
