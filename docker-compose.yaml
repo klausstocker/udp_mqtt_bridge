@@ -1,0 +1,7 @@
+services:
+  udp-mqtt-bridge:
+    build: .
+    container_name: udp-mqtt-bridge
+    restart: unless-stopped
+    ports:
+      - "1200:1200/udp"

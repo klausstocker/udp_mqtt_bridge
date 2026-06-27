@@ -1,46 +1,80 @@
 import asyncio
-import socket
-import paho.mqtt.client as paho
-import re
+import sys
 import time
-broker="192.168.1.11"
-port=1883
 
+import paho.mqtt.client as paho
 
-localIP     = "0.0.0.0"
-localPort   = 1200
-bufferSize  = 1024
+broker = "192.168.1.11"
+port = 1883
+
+localIP = "0.0.0.0"
+localPort = 1200
 
 phaseCnt = 1
 lastPhaseSwitch = time.time() - 300
 
-gPower = 0.
+gPower = 0.0
 gAllow = 0
+phaseSwitchRetry = None
+
+
+def fatal_error(message, error=None):
+	if error is not None:
+		print(f"ERROR: {message}: {error}")
+	else:
+		print(f"ERROR: {message}")
+	sys.exit(1)
+
+
+def schedule_phase_switch_retry(delay):
+	global phaseSwitchRetry
+	try:
+		loop = asyncio.get_running_loop()
+	except RuntimeError as error:
+		fatal_error("failed to schedule phase switch retry", error)
+	if phaseSwitchRetry is None or phaseSwitchRetry.cancelled():
+		print(f'schedule phase switch retry in {delay:.1f}s')
+		phaseSwitchRetry = loop.call_later(delay, publish)
+
+
+def cancel_phase_switch_retry():
+	global phaseSwitchRetry
+	if phaseSwitchRetry is not None:
+		phaseSwitchRetry.cancel()
+		phaseSwitchRetry = None
+
+
+def handle_message(message):
+	global gPower, gAllow
+	if message.startswith('Power='):
+		power = float(message.split('=', 1)[1])
+		gPower = min(power, 11)
+		print(f'publish power={gPower}')
+		publish()
+	elif message.startswith('Allow='):
+		allow = int(message.split('=', 1)[1])
+		gAllow = allow
+		print(f'publish allow={gAllow}')
+		publish()
+
 
 class UDP2MQTT(asyncio.DatagramProtocol):
 	def connection_made(self, transport):
 		self.transport = transport
 
 	def datagram_received(self, data, addr):
-		global gPower, gAllow
-		message = data.decode()
-		print(f"Received {message} from {addr}")
-		m = re.match(r'Power=([\d\.\d]+)', message)
-		if m:
-			gPower = min(float(m.group(1)), 11)
-			print(f'publish power={gPower}')
-			publish()
-		m = re.match(r'Allow=(\d)', message)
-		if m:
-			gAllow = int(m.group(1))
-			print(f'publish allow={gAllow}')
-			publish()
+		try:
+			message = data.decode()
+			print(f"Received {message} from {addr}")
+			handle_message(message)
+		except SystemExit:
+			raise
+		except Exception as error:
+			fatal_error("failed to process UDP packet", error)
 
 
 async def run_server():
-	global gPower, gAllow
 	print("Starting UDP server")
-	# Bind to localhost on UDP port 8888
 	loop = asyncio.get_running_loop()
 	transport, _ = await loop.create_datagram_endpoint(
 		lambda: UDP2MQTT(),
@@ -56,31 +90,49 @@ async def run_server():
 
 def publish():
 	global gPower, phaseCnt, lastPhaseSwitch, gAllow
-	phaseCntNew  = 1 if gPower < 4. else 3
+	phaseCntNew = 1 if gPower < 4.0 else 3
 	print(f'gPower={gPower}, phaseCntNew={phaseCntNew}')
 	if phaseCnt is not None and phaseCnt != phaseCntNew:
 		now = time.time()
-		diff = int(now - lastPhaseSwitch)
-		print(f'diff={diff}')
+		diff = now - lastPhaseSwitch
+		print(f'diff={int(diff)}')
 		if diff > 300:
 			phaseCnt = phaseCntNew
 			lastPhaseSwitch = now
+			cancel_phase_switch_retry()
+		else:
+			schedule_phase_switch_retry(max(0.1, 300.1 - diff))
+	else:
+		cancel_phase_switch_retry()
 	psm = '1' if phaseCnt < 2 else '2'
-	current = int(round(gPower * 1000. / (230. * phaseCnt)))
+	current = int(round(gPower * 1000.0 / (230.0 * phaseCnt)))
 	current = max(6, min(16, current))
 	frc = 2 if gAllow == 1 else 1
-	print(f'publish phaseCnt={phaseCnt}, current={current}, frc={frc} gAllow={gAllow}') 
-	client = paho.Client(paho.CallbackAPIVersion.VERSION1)   
-	def on_connect(client, userdata, flags, rc):
-		if rc == 0:
-			print("Connected to MQTT Broker!")
-		else:
-			print("Failed to connect, return code %d\n", rc)
-	client.connect(broker, port)
-	client.publish("go-eCharger/052332/amp/set", current) 
-	client.publish("go-eCharger/052332/psm/set", psm)
-	client.publish("go-eCharger/052332/frc/set", frc) 
+	print(f'publish phaseCnt={phaseCnt}, current={current}, frc={frc} gAllow={gAllow}')
+	client = paho.Client(paho.CallbackAPIVersion.VERSION1)
+	try:
+		client.connect(broker, port)
+		publish_result = client.publish("go-eCharger/052332/amp/set", current)
+		if publish_result.rc != paho.MQTT_ERR_SUCCESS:
+			fatal_error(f"failed to publish current, return code {publish_result.rc}")
+		publish_result = client.publish("go-eCharger/052332/psm/set", psm)
+		if publish_result.rc != paho.MQTT_ERR_SUCCESS:
+			fatal_error(f"failed to publish phase switch mode, return code {publish_result.rc}")
+		publish_result = client.publish("go-eCharger/052332/frc/set", frc)
+		if publish_result.rc != paho.MQTT_ERR_SUCCESS:
+			fatal_error(f"failed to publish force state, return code {publish_result.rc}")
+	except SystemExit:
+		raise
+	except Exception as error:
+		fatal_error("failed to publish MQTT messages", error)
+	finally:
+		client.disconnect()
 
 
 if __name__ == '__main__':
-	asyncio.run(run_server())
+	try:
+		asyncio.run(run_server())
+	except SystemExit:
+		raise
+	except Exception as error:
+		fatal_error("server stopped unexpectedly", error)
