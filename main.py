@@ -15,6 +15,7 @@ lastPhaseSwitch = time.time() - 300
 
 gPower = 0.0
 gAllow = 0
+phaseSwitchRetry = None
 
 
 def fatal_error(message, error=None):
@@ -23,6 +24,24 @@ def fatal_error(message, error=None):
 	else:
 		print(f"ERROR: {message}")
 	sys.exit(1)
+
+
+def schedule_phase_switch_retry(delay):
+	global phaseSwitchRetry
+	try:
+		loop = asyncio.get_running_loop()
+	except RuntimeError as error:
+		fatal_error("failed to schedule phase switch retry", error)
+	if phaseSwitchRetry is None or phaseSwitchRetry.cancelled():
+		print(f'schedule phase switch retry in {delay:.1f}s')
+		phaseSwitchRetry = loop.call_later(delay, publish)
+
+
+def cancel_phase_switch_retry():
+	global phaseSwitchRetry
+	if phaseSwitchRetry is not None:
+		phaseSwitchRetry.cancel()
+		phaseSwitchRetry = None
 
 
 def handle_message(message):
@@ -75,11 +94,16 @@ def publish():
 	print(f'gPower={gPower}, phaseCntNew={phaseCntNew}')
 	if phaseCnt is not None and phaseCnt != phaseCntNew:
 		now = time.time()
-		diff = int(now - lastPhaseSwitch)
-		print(f'diff={diff}')
+		diff = now - lastPhaseSwitch
+		print(f'diff={int(diff)}')
 		if diff > 300:
 			phaseCnt = phaseCntNew
 			lastPhaseSwitch = now
+			cancel_phase_switch_retry()
+		else:
+			schedule_phase_switch_retry(max(0.1, 300.1 - diff))
+	else:
+		cancel_phase_switch_retry()
 	psm = '1' if phaseCnt < 2 else '2'
 	current = int(round(gPower * 1000.0 / (230.0 * phaseCnt)))
 	current = max(6, min(16, current))
