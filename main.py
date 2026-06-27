@@ -1,5 +1,4 @@
 import asyncio
-import re
 import sys
 import time
 
@@ -35,14 +34,14 @@ class UDP2MQTT(asyncio.DatagramProtocol):
 		try:
 			message = data.decode()
 			print(f"Received {message} from {addr}")
-			m = re.match(r'Power=([\d\.\d]+)', message)
-			if m:
-				gPower = min(float(m.group(1)), 11)
+			if message.startswith('Power='):
+				power = float(message.split('=', 1)[1])
+				gPower = min(power, 11)
 				print(f'publish power={gPower}')
 				publish()
-			m = re.match(r'Allow=(\d)', message)
-			if m:
-				gAllow = int(m.group(1))
+			elif message.startswith('Allow='):
+				allow = int(message.split('=', 1)[1])
+				gAllow = allow
 				print(f'publish allow={gAllow}')
 				publish()
 		except SystemExit:
